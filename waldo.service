@@ -1,0 +1,12 @@
+[Unit]
+Description=Screen lock/unlock webhook notifier
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/waldo --config %h/.config/waldo/config.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
