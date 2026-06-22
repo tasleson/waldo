@@ -3,11 +3,21 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{Datelike, Local, Timelike, Weekday};
 use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::dbus::Login1SessionProxy;
 use crate::webhook::{EventType, WebhookClient};
+
+fn is_weekend() -> bool {
+    matches!(Local::now().weekday(), Weekday::Sat | Weekday::Sun)
+}
+
+fn is_after_work_hours() -> bool {
+    let now = Local::now();
+    now.hour() > 17 || (now.hour() == 17 && now.minute() >= 30)
+}
 
 const FAR_FUTURE: Duration = Duration::from_secs(86400 * 365);
 
@@ -61,7 +71,7 @@ impl Monitor {
                         Ok(locked) => {
                             tracing::debug!("LockedHint changed to {locked}");
                             if locked {
-                                self.handle_lock(&mut debounce_timer);
+                                self.handle_lock(&mut debounce_timer).await;
                             } else {
                                 self.handle_unlock(&mut debounce_timer).await;
                             }
@@ -100,14 +110,22 @@ impl Monitor {
         }
     }
 
-    fn handle_lock(&mut self, timer: &mut std::pin::Pin<&mut tokio::time::Sleep>) {
+    async fn handle_lock(&mut self, timer: &mut std::pin::Pin<&mut tokio::time::Sleep>) {
         match self.state {
             State::Unlocked => {
                 let now = Instant::now();
-                tracing::info!("Lock signal received, starting debounce timer");
-                self.state = State::PendingLock { locked_at: now };
-                let deadline = now + Duration::from_secs(self.config.min_lock_duration_secs);
-                timer.as_mut().reset(deadline);
+                if !is_weekend() && is_after_work_hours() {
+                    tracing::info!("Lock signal received after hours, sending notification immediately");
+                    if self.maybe_send_webhook(EventType::Locked, None).await {
+                        self.lock_webhook_sent = true;
+                    }
+                    self.state = State::Locked { locked_at: now };
+                } else {
+                    tracing::info!("Lock signal received, starting debounce timer");
+                    self.state = State::PendingLock { locked_at: now };
+                    let deadline = now + Duration::from_secs(self.config.min_lock_duration_secs);
+                    timer.as_mut().reset(deadline);
+                }
             }
             State::PendingLock { .. } | State::Locked { .. } => {
                 tracing::debug!("Duplicate lock signal, ignoring");
@@ -147,12 +165,16 @@ impl Monitor {
         }
     }
 
-    // Returns true if the webhook was actually sent.
     async fn maybe_send_webhook(
         &mut self,
         event: EventType,
         lock_duration: Option<Duration>,
     ) -> bool {
+        if is_weekend() {
+            tracing::info!("Weekend — suppressing {event:?} webhook");
+            return false;
+        }
+
         let force = matches!(event, EventType::Unlocked) && self.lock_webhook_sent;
 
         if !force {
