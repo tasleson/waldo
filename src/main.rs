@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 mod config;
 mod dbus;
 mod state;

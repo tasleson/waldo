@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
@@ -115,7 +116,9 @@ impl Monitor {
             State::Unlocked => {
                 let now = Instant::now();
                 if !is_weekend() && is_after_work_hours() {
-                    tracing::info!("Lock signal received after hours, sending notification immediately");
+                    tracing::info!(
+                        "Lock signal received after hours, sending notification immediately"
+                    );
                     if self.maybe_send_webhook(EventType::Locked, None).await {
                         self.lock_webhook_sent = true;
                     }

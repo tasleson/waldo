@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 use zbus::Connection;
 use zbus::zvariant::OwnedObjectPath;
 
