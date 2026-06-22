@@ -1,3 +1,5 @@
+<img width="600" height="600" alt="waldo" src="https://github.com/user-attachments/assets/a7b71e34-ad59-4493-95ff-96fbbe25ee34" />
+
 # waldo
 
 A background service that monitors screen lock/unlock events via the systemd-logind `LockedHint` session property and sends webhook notifications. Designed to post presence status updates (online/offline) to Slack or similar services.
