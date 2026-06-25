@@ -119,7 +119,7 @@ impl Monitor {
                     tracing::info!(
                         "Lock signal received after hours, sending notification immediately"
                     );
-                    if self.maybe_send_webhook(EventType::Locked, None).await {
+                    if self.maybe_send_webhook(EventType::Locked, None, true).await {
                         self.lock_webhook_sent = true;
                     }
                     self.state = State::Locked { locked_at: now };
@@ -147,7 +147,7 @@ impl Monitor {
             State::Locked { locked_at } => {
                 let duration = locked_at.elapsed();
                 tracing::info!("Unlocked after {duration:.0?}");
-                self.maybe_send_webhook(EventType::Unlocked, Some(duration))
+                self.maybe_send_webhook(EventType::Unlocked, Some(duration), false)
                     .await;
                 self.lock_webhook_sent = false;
                 self.state = State::Unlocked;
@@ -161,7 +161,10 @@ impl Monitor {
     async fn handle_timer_fired(&mut self) {
         if let State::PendingLock { locked_at } = self.state {
             tracing::info!("Lock persisted past threshold, sending notification");
-            if self.maybe_send_webhook(EventType::Locked, None).await {
+            if self
+                .maybe_send_webhook(EventType::Locked, None, false)
+                .await
+            {
                 self.lock_webhook_sent = true;
             }
             self.state = State::Locked { locked_at };
@@ -172,13 +175,14 @@ impl Monitor {
         &mut self,
         event: EventType,
         lock_duration: Option<Duration>,
+        force: bool,
     ) -> bool {
         if is_weekend() {
             tracing::info!("Weekend — suppressing {event:?} webhook");
             return false;
         }
 
-        let force = matches!(event, EventType::Unlocked) && self.lock_webhook_sent;
+        let force = force || (matches!(event, EventType::Unlocked) && self.lock_webhook_sent);
 
         if !force {
             if let Some(last) = self.last_webhook_sent {
