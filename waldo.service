@@ -7,6 +7,9 @@ Type=simple
 ExecStart=%h/.cargo/bin/waldo --config %h/.config/waldo/config.toml
 Restart=on-failure
 RestartSec=5
+# Allow time to deliver the "offline" webhook on logout/reboot, but do
+# not hold up session teardown if the network is already gone.
+TimeoutStopSec=15
 
 [Install]
 WantedBy=graphical-session.target

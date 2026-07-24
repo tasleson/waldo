@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 mod config;
 mod dbus;
+mod persist;
 mod state;
 mod webhook;
 
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use crate::config::Config;
+use crate::persist::StateFile;
 use crate::state::Monitor;
 use crate::webhook::WebhookClient;
 
@@ -55,16 +57,19 @@ async fn main() -> anyhow::Result<()> {
 
     let session = dbus::session_proxy(&conn, session_path).await?;
     let webhook = WebhookClient::new(&config);
-    let mut monitor = Monitor::new(config, config_path, webhook);
+    let state_path = StateFile::default_path();
+    tracing::info!("Using state file {}", state_path.display());
+    let state_file = StateFile::load(state_path);
+    let mut monitor = Monitor::new(config, config_path, webhook, state_file);
 
-    tokio::select! {
-        result = monitor.run(&session) => {
-            result?;
+    let locked = match session.locked_hint().await {
+        Ok(locked) => locked,
+        Err(e) => {
+            tracing::warn!("Failed to read initial LockedHint, assuming unlocked: {e}");
+            false
         }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Received shutdown signal, exiting");
-        }
-    }
+    };
+    monitor.startup(locked).await;
 
-    Ok(())
+    monitor.run(&session).await
 }

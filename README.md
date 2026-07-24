@@ -11,6 +11,13 @@ Waldo watches the `LockedHint` property on your logind session over D-Bus, react
 - **Minimum lock duration** -- a "locked" (offline) webhook is only sent if the screen stays locked for a configurable threshold (default 5 minutes). Unlocking before the threshold produces no notification.
 - **Cooldown** -- after sending any webhook, further webhooks are suppressed for a configurable period (default 10 minutes). Exception: an "online" webhook always fires if a corresponding "offline" was sent, so events stay paired.
 
+Waldo also keeps the remote side in sync across restarts:
+
+- **Persistent state** -- the last status successfully delivered is recorded in `$XDG_STATE_HOME/waldo/state.toml` (default `~/.local/state/waldo/state.toml`). At startup, waldo compares this against the actual session state and sends a webhook if the remote side is out of date -- so after a reboot or service restart an "online" notification goes out even though no lock/unlock event ever fired.
+- **Offline on shutdown** -- on SIGTERM or SIGINT (sent by systemd on logout, reboot, or `systemctl --user stop waldo`), waldo sends an "offline" webhook before exiting if the remote side last heard "online".
+
+Weekend suppression applies to these webhooks too.
+
 ## Requirements
 
 - Linux with systemd-logind (GNOME, KDE, or any desktop using logind for session management)

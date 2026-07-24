@@ -9,6 +9,7 @@ use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::dbus::Login1SessionProxy;
+use crate::persist::{ReportedStatus, StateFile};
 use crate::webhook::{EventType, WebhookClient};
 
 fn is_weekend() -> bool {
@@ -32,22 +33,57 @@ enum State {
 pub struct Monitor {
     state: State,
     last_webhook_sent: Option<Instant>,
-    lock_webhook_sent: bool,
     config: Arc<Config>,
     config_path: PathBuf,
     webhook: WebhookClient,
+    state_file: StateFile,
 }
 
 impl Monitor {
-    pub fn new(config: Arc<Config>, config_path: PathBuf, webhook: WebhookClient) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        webhook: WebhookClient,
+        state_file: StateFile,
+    ) -> Self {
         Self {
             state: State::Unlocked,
             last_webhook_sent: None,
-            lock_webhook_sent: false,
             config,
             config_path,
             webhook,
+            state_file,
         }
+    }
+
+    /// Compare the persisted last-reported status against the actual session
+    /// state and send a webhook if the remote side is out of date. This covers
+    /// restarts and reboots, where no LockedHint change will ever fire.
+    pub async fn startup(&mut self, locked: bool) {
+        let actual = if locked {
+            ReportedStatus::Offline
+        } else {
+            ReportedStatus::Online
+        };
+        if locked {
+            self.state = State::Locked {
+                locked_at: Instant::now(),
+            };
+        }
+
+        let last = self.state_file.last_reported();
+        if last == Some(actual) {
+            tracing::info!("Startup: remote already knows we are {actual:?}");
+            return;
+        }
+
+        tracing::info!("Startup: last reported {last:?} but we are {actual:?}, reconciling");
+        let event = if locked {
+            EventType::Locked
+        } else {
+            EventType::Unlocked
+        };
+        self.maybe_send_webhook(event, None, true).await;
     }
 
     pub async fn run(&mut self, session: &Login1SessionProxy<'_>) -> anyhow::Result<()> {
@@ -58,6 +94,8 @@ impl Monitor {
         let debounce_timer = pin!(tokio::time::sleep(FAR_FUTURE));
         let mut debounce_timer = debounce_timer;
         let mut sighup = signal(SignalKind::hangup())?;
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
 
         tracing::info!(
             "Monitoring started (min_lock={}s, cooldown={}s)",
@@ -89,7 +127,25 @@ impl Monitor {
                 _ = sighup.recv() => {
                     self.reload_config();
                 }
+                _ = sigterm.recv() => {
+                    self.handle_shutdown("SIGTERM").await;
+                    return Ok(());
+                }
+                _ = sigint.recv() => {
+                    self.handle_shutdown("SIGINT").await;
+                    return Ok(());
+                }
             }
+        }
+    }
+
+    /// On logout, reboot, or manual stop, tell the remote side we are offline
+    /// if it currently believes we are online.
+    async fn handle_shutdown(&mut self, signal_name: &str) {
+        tracing::info!("Received {signal_name}, shutting down");
+        if self.state_file.last_reported() == Some(ReportedStatus::Online) {
+            tracing::info!("Reporting offline before exit");
+            self.maybe_send_webhook(EventType::Locked, None, true).await;
         }
     }
 
@@ -119,9 +175,7 @@ impl Monitor {
                     tracing::info!(
                         "Lock signal received after hours, sending notification immediately"
                     );
-                    if self.maybe_send_webhook(EventType::Locked, None, true).await {
-                        self.lock_webhook_sent = true;
-                    }
+                    self.maybe_send_webhook(EventType::Locked, None, true).await;
                     self.state = State::Locked { locked_at: now };
                 } else {
                     tracing::info!("Lock signal received, starting debounce timer");
@@ -149,7 +203,6 @@ impl Monitor {
                 tracing::info!("Unlocked after {duration:.0?}");
                 self.maybe_send_webhook(EventType::Unlocked, Some(duration), false)
                     .await;
-                self.lock_webhook_sent = false;
                 self.state = State::Unlocked;
             }
             State::Unlocked => {
@@ -161,12 +214,8 @@ impl Monitor {
     async fn handle_timer_fired(&mut self) {
         if let State::PendingLock { locked_at } = self.state {
             tracing::info!("Lock persisted past threshold, sending notification");
-            if self
-                .maybe_send_webhook(EventType::Locked, None, false)
-                .await
-            {
-                self.lock_webhook_sent = true;
-            }
+            self.maybe_send_webhook(EventType::Locked, None, false)
+                .await;
             self.state = State::Locked { locked_at };
         }
     }
@@ -176,13 +225,17 @@ impl Monitor {
         event: EventType,
         lock_duration: Option<Duration>,
         force: bool,
-    ) -> bool {
+    ) {
         if is_weekend() {
             tracing::info!("Weekend — suppressing {event:?} webhook");
-            return false;
+            return;
         }
 
-        let force = force || (matches!(event, EventType::Unlocked) && self.lock_webhook_sent);
+        // An "online" webhook always fires if the remote was last told
+        // "offline", so events stay paired.
+        let force = force
+            || (matches!(event, EventType::Unlocked)
+                && self.state_file.last_reported() == Some(ReportedStatus::Offline));
 
         if !force {
             if let Some(last) = self.last_webhook_sent {
@@ -194,7 +247,7 @@ impl Monitor {
                         cooldown - elapsed,
                         event,
                     );
-                    return false;
+                    return;
                 }
             }
         }
@@ -202,12 +255,14 @@ impl Monitor {
         match self.webhook.send(event, lock_duration).await {
             Ok(()) => {
                 self.last_webhook_sent = Some(Instant::now());
+                self.state_file.record(match event {
+                    EventType::Locked => ReportedStatus::Offline,
+                    EventType::Unlocked => ReportedStatus::Online,
+                });
                 tracing::info!("Webhook sent: {event:?}");
-                true
             }
             Err(e) => {
                 tracing::error!("Webhook failed: {e:#}");
-                false
             }
         }
     }
