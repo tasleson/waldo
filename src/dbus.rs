@@ -37,10 +37,18 @@ pub async fn discover_session(conn: &Connection) -> anyhow::Result<OwnedObjectPa
 
     let our_uid = unsafe { libc::getuid() };
     let sessions = manager.list_sessions().await?;
-    if let Some((id, _uid, _user, _seat, path)) = sessions
+    let ours: Vec<_> = sessions
         .iter()
-        .find(|(_id, uid, _user, _seat, _path)| *uid == our_uid)
-        .or(sessions.first())
+        .filter(|(_id, uid, _user, _seat, _path)| *uid == our_uid)
+        .collect();
+
+    // Prefer sessions with a seat — those are graphical sessions that
+    // support screen locking. The "manager" class session has no seat.
+    if let Some((id, _uid, _user, _seat, path)) = ours
+        .iter()
+        .find(|(_id, _uid, _user, seat, _path)| !seat.is_empty())
+        .or(ours.first())
+        .or(sessions.first().as_ref())
     {
         tracing::info!("Using session {id} at {path}");
         return Ok(path.clone());
